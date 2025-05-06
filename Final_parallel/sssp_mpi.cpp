@@ -5,14 +5,13 @@
 #include <fstream>
 #include <sstream>
 #include <mpi.h>
-#include <omp.h>
 #include <unordered_map>
 #include <set>
 #include <algorithm>  
 #include <chrono>
 #include <random>
 #include <iomanip>
-#include <cmath> 
+#include <cmath>
 
 using namespace std;
 
@@ -57,7 +56,7 @@ struct EdgeUpdate {
     int src, dest;
     double weight;
     bool is_insertion;  
-    EdgeUpdate() : src(-1), dest(-1), weight(0.0), is_insertion(false) {}
+    EdgeUpdate() : src(-1), dest(-1), weight(0.0), is_insertion(false) {}  
     EdgeUpdate(int s, int d, double w, bool ins) 
         : src(s), dest(d), weight(w), is_insertion(ins) {}
 };
@@ -102,7 +101,7 @@ Graph read_graph(const string& filename) {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         graph.adj_list[mapped_u].emplace_back(mapped_v, weight);
-        graph.adj_list[mapped_v].emplace_back(mapped_u, weight);
+        graph.adj_list[mapped_v].emplace_back(mapped_u, weight); // Undirected graph
     }
 
     file.close();
@@ -110,7 +109,7 @@ Graph read_graph(const string& filename) {
 }
 
 vector<int> read_partitions(const string& partition_file, int num_nodes) {
-    vector<int> partition(num_nodes, 0);
+    vector<int> partition(num_nodes, 0);  // Default all nodes to partition 0
     
     ifstream file(partition_file);
     if (!file.is_open()) {
@@ -210,7 +209,6 @@ void print_partition_info(const vector<int>& partition, int num_nodes, int num_p
         }
         cout << " |" << endl;
     }
-    cout << "-----------------------------------------" << endl;
 }
 
 void print_graph(const Graph& graph) {
@@ -241,10 +239,12 @@ void print_graph(const Graph& graph) {
 
 void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info, 
                             SSSPData& sssp_data, int source, int rank, int num_procs) {
+    // Initialize distances for local vertices
     if (rank == 0) {
         cout << "[Rank " << rank << "] Initializing SSSP with source vertex: " << source << endl;
     }
     
+    // Initialize all distances to infinity and parents to -1
     for (size_t i = 0; i < graph.num_nodes; i++) {
         sssp_data.distances[i] = INF;
         sssp_data.parents[i] = -1;
@@ -256,6 +256,7 @@ void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info
         cout << "[Rank " << rank << "] Setting distance[" << source << "] = 0.0" << endl;
     }
     
+    // Make sure all processes have the initial state
     for (int i = 0; i < graph.num_nodes; i++) {
         MPI_Bcast(&sssp_data.distances[i], 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         MPI_Bcast(&sssp_data.parents[i], 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -284,7 +285,7 @@ void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info
         bool local_changes = false;
         int local_relaxations = 0;
         
-        #pragma omp parallel for reduction(+:local_relaxations) reduction(|:local_changes)
+        // Process local vertices (edge relaxation)
         for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
             int u = part_info.local_vertices[i];
             
@@ -295,19 +296,15 @@ void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info
                 double weight = edge.second;
                 double potential_dist = sssp_data.distances[u] + weight;
                 
+                // Relaxation: If we found a shorter path to v
                 if (potential_dist < new_distances[v]) {
-                    #pragma omp critical
-                    {
-                        if (potential_dist < new_distances[v]) {
-                            new_distances[v] = potential_dist;
-                            new_parents[v] = u;
-                            local_changes = true;
-                            local_relaxations++;
-                            
-                            if (rank == 0 && (v == u || (new_parents[v] == u && new_parents[u] == v))) {
-                                cout << "[Warning] Potential cycle detected between " << u << " and " << v << endl;
-                            }
-                        }
+                    new_distances[v] = potential_dist;
+                    new_parents[v] = u;
+                    local_changes = true;
+                    local_relaxations++;
+                    
+                    if (rank == 0 && (v == u || (new_parents[v] == u && new_parents[u] == v))) {
+                        cout << "[Warning] Potential cycle detected between " << u << " and " << v << endl;
                     }
                 }
             }
@@ -342,6 +339,7 @@ void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info
             }
         }
         
+        // Enforce a maximum number of iterations to prevent infinite loops
         if (iterations >= MAX_ITERATIONS) {
             if (rank == 0) {
                 cout << "[Rank " << rank << "] Warning: SSSP computation reached maximum iterations (" 
@@ -374,27 +372,24 @@ void compute_sssp_distributed(const Graph& graph, const PartitionInfo& part_info
             }
         }
         
-        if (!has_cycle) {
-            cout << "[Rank " << rank << "] SSSP tree verification passed: No cycles detected." << endl;
-        }
+        // if (!has_cycle) {
+        //     // cout << "[Rank " << rank << "] SSSP tree verification passed: No cycles detected." << endl;
+        // }
     }
 }
 
 void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updates,
                            SSSPData& sssp_data, int source, int rank, const PartitionInfo& part_info) {
+    // Reset affected status
     fill(sssp_data.is_affected.begin(), sssp_data.is_affected.end(), false);
     
-    #pragma omp parallel for
     for (size_t i = 0; i < updates.size(); i++) {
         const EdgeUpdate& update = updates[i];
         
         if (update.src < 0 || update.src >= graph.num_nodes || 
             update.dest < 0 || update.dest >= graph.num_nodes) {
-            #pragma omp critical
-            {
-                cerr << "[Error] Invalid node indices in update: " 
-                     << update.src << " -> " << update.dest << endl;
-            }
+            cerr << "[Error] Invalid node indices in update: " 
+                 << update.src << " -> " << update.dest << endl;
             continue;
         }
         
@@ -407,7 +402,6 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
             if (sssp_data.distances[u] != INF) {
                 double potential_dist = sssp_data.distances[u] + weight;
                 if (potential_dist < sssp_data.distances[v]) {
-                    #pragma omp critical
                     sssp_data.is_affected[v] = true;
                 }
             }
@@ -415,23 +409,19 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
             if (sssp_data.distances[v] != INF) {
                 double potential_dist = sssp_data.distances[v] + weight;
                 if (potential_dist < sssp_data.distances[u]) {
-                    #pragma omp critical
                     sssp_data.is_affected[u] = true;
                 }
             }
         } else {
-            #pragma omp critical
-            {
-                if (sssp_data.parents[v] == u || sssp_data.parents[u] == v) {
-                    sssp_data.is_affected[u] = true;
-                    sssp_data.is_affected[v] = true;
-                    
-                    if (sssp_data.parents[v] == u) {
-                        sssp_data.distances[v] = INF;
-                    }
-                    if (sssp_data.parents[u] == v) {
-                        sssp_data.distances[u] = INF;
-                    }
+            if (sssp_data.parents[v] == u || sssp_data.parents[u] == v) {
+                sssp_data.is_affected[u] = true;
+                sssp_data.is_affected[v] = true;
+                
+                if (sssp_data.parents[v] == u) {
+                    sssp_data.distances[v] = INF;  
+                }
+                if (sssp_data.parents[u] == v) {
+                    sssp_data.distances[u] = INF;  
                 }
             }
         }
@@ -446,7 +436,6 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
     vector<int> local_affected(graph.num_nodes, 0);
     vector<int> global_affected(graph.num_nodes, 0);
     
-    #pragma omp parallel for
     for (int i = 0; i < graph.num_nodes; i++) {
         if (sssp_data.is_affected[i]) {
             local_affected[i] = 1;
@@ -456,27 +445,28 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
     MPI_Allreduce(local_affected.data(), global_affected.data(), graph.num_nodes, 
                  MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     
-    #pragma omp parallel for
     for (int i = 0; i < graph.num_nodes; i++) {
         if (global_affected[i] == 1) {
             sssp_data.is_affected[i] = true;
         }
     }
     
+    // Second pass: Propagate affected status to descendants in the SSSP tree
+    // Using fixed number of iterations to avoid deadlocks
     const int MAX_PROPAGATION_ITERATIONS = min(10, graph.num_nodes);
     
     for (int iter = 0; iter < MAX_PROPAGATION_ITERATIONS; iter++) {
+
         fill(local_affected.begin(), local_affected.end(), 0);
         
-        #pragma omp parallel for
         for (size_t idx = 0; idx < part_info.local_vertices.size(); idx++) {
             int node = part_info.local_vertices[idx];
-            if (node < 0 || node >= graph.num_nodes) continue;
+            if (node < 0 || node >= graph.num_nodes) continue; 
             
             if (sssp_data.is_affected[node]) {
                 for (const auto& edge : graph.adj_list[node]) {
                     int child = edge.first;
-                    if (child < 0 || child >= graph.num_nodes) continue;
+                    if (child < 0 || child >= graph.num_nodes) continue; 
                     
                     if (sssp_data.parents[child] == node && !sssp_data.is_affected[child]) {
                         local_affected[child] = 1;
@@ -495,7 +485,6 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
         
         bool any_changes = false;
         
-        #pragma omp parallel for reduction(|:any_changes)
         for (int i = 0; i < graph.num_nodes; i++) {
             if (global_affected[i] == 1 && !sssp_data.is_affected[i]) {
                 sssp_data.is_affected[i] = true;
@@ -507,7 +496,7 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
         MPI_Allreduce(&any_changes, &global_done, 1, MPI_C_BOOL, MPI_LOR, MPI_COMM_WORLD);
         
         if (!global_done) {
-            break;
+            break; 
         }
     }
     
@@ -522,7 +511,7 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
     
     for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
         int node = part_info.local_vertices[i];
-        if (node < 0 || node >= graph.num_nodes) continue;
+        if (node < 0 || node >= graph.num_nodes) continue; 
         
         if (sssp_data.is_affected[node]) {
             local_partition_affected++;
@@ -531,7 +520,7 @@ void identify_affected_nodes(const Graph& graph, const vector<EdgeUpdate>& updat
     
     int global_affected_count = 0;
     MPI_Reduce(&local_affected_count, &global_affected_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-
+    
     
     cout << "\n[Rank " << rank << "] Has " << local_partition_affected << " affected nodes in its partition (";
     if (part_info.local_vertices.size() > 0) {
@@ -564,18 +553,17 @@ void compute_sssp_incremental(const Graph& graph, const PartitionInfo& part_info
     
     bool global_changes;
     int iterations = 0;
-    const int MAX_ITERATIONS = min(100, graph.num_nodes);
+    const int MAX_ITERATIONS = min(100, graph.num_nodes); 
     
     int local_affected_count = 0;
     for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
         int node = part_info.local_vertices[i];
-        if (node < 0 || node >= graph.num_nodes) continue;
+        if (node < 0 || node >= graph.num_nodes) continue; 
         
         if (sssp_data.is_affected[node]) {
             local_affected_count++;
         }
     }
-    
     
     do {    
         iterations++;
@@ -583,10 +571,9 @@ void compute_sssp_incremental(const Graph& graph, const PartitionInfo& part_info
         bool local_changes = false;
         int local_relaxations = 0;
         
-        #pragma omp parallel for reduction(+:local_relaxations) reduction(|:local_changes)
         for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
             int u = part_info.local_vertices[i];
-            if (u < 0 || u >= graph.num_nodes) continue;
+            if (u < 0 || u >= graph.num_nodes) continue; 
             
             if (sssp_data.distances[u] == INF) continue;
             
@@ -594,7 +581,7 @@ void compute_sssp_incremental(const Graph& graph, const PartitionInfo& part_info
             if (!process_vertex) {
                 for (const auto& edge : graph.adj_list[u]) {
                     int neighbor = edge.first;
-                    if (neighbor < 0 || neighbor >= graph.num_nodes) continue;
+                    if (neighbor < 0 || neighbor >= graph.num_nodes) continue; 
                     
                     if (sssp_data.is_affected[neighbor]) {
                         process_vertex = true;
@@ -607,21 +594,16 @@ void compute_sssp_incremental(const Graph& graph, const PartitionInfo& part_info
             
             for (const auto& edge : graph.adj_list[u]) {
                 int v = edge.first;
-                if (v < 0 || v >= graph.num_nodes) continue;
+                if (v < 0 || v >= graph.num_nodes) continue; 
                 
                 double weight = edge.second;
                 double potential_dist = sssp_data.distances[u] + weight;
                 
                 if (potential_dist < new_distances[v]) {
-                    #pragma omp critical
-                    {
-                        if (potential_dist < new_distances[v]) {
-                            new_distances[v] = potential_dist;
-                            new_parents[v] = u;
-                            local_changes = true;
-                            local_relaxations++;
-                        }
-                    }
+                    new_distances[v] = potential_dist;
+                    new_parents[v] = u;
+                    local_changes = true;
+                    local_relaxations++;
                 }
             }
         }
@@ -702,7 +684,7 @@ void compute_sssp_incremental(const Graph& graph, const PartitionInfo& part_info
     int local_processed = 0;
     for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
         int node = part_info.local_vertices[i];
-        if (node < 0 || node >= graph.num_nodes) continue;
+        if (node < 0 || node >= graph.num_nodes) continue; 
         
         if (sssp_data.is_affected[node]) {
             local_processed++;
@@ -736,7 +718,6 @@ void process_updates(Graph& graph, const vector<EdgeUpdate>& updates,
     
     int invalid_update_count = 0;
     
-    #pragma omp parallel for reduction(+:invalid_update_count)
     for (size_t i = 0; i < updates.size(); i++) {
         const EdgeUpdate& update = updates[i];
         
@@ -755,47 +736,41 @@ void process_updates(Graph& graph, const vector<EdgeUpdate>& updates,
             bool found_u_to_v = false;
             bool found_v_to_u = false;
             
-            #pragma omp critical
-            {
-                for (auto& edge : graph.adj_list[u]) {
-                    if (edge.first == v) {
-                        edge.second = weight;
-                        found_u_to_v = true;
-                        break;
-                    }
-                }
-                if (!found_u_to_v) {
-                    graph.adj_list[u].emplace_back(v, weight);
-                }
-                
-                for (auto& edge : graph.adj_list[v]) {
-                    if (edge.first == u) {
-                        edge.second = weight;
-                        found_v_to_u = true;
-                        break;
-                    }
-                }
-                if (!found_v_to_u) {
-                    graph.adj_list[v].emplace_back(u, weight);
+            for (auto& edge : graph.adj_list[u]) {
+                if (edge.first == v) {
+                    edge.second = weight;  
+                    found_u_to_v = true;
+                    break;
                 }
             }
-        } else {
-            #pragma omp critical
-            {
-                for (auto it = graph.adj_list[u].begin(); it != graph.adj_list[u].end(); ) {
-                    if (it->first == v) {
-                        it = graph.adj_list[u].erase(it);
-                    } else {
-                        ++it;
-                    }
+            if (!found_u_to_v) {
+                graph.adj_list[u].emplace_back(v, weight);  
+            }
+            
+            for (auto& edge : graph.adj_list[v]) {
+                if (edge.first == u) {
+                    edge.second = weight;  
+                    found_v_to_u = true;
+                    break;
                 }
-                
-                for (auto it = graph.adj_list[v].begin(); it != graph.adj_list[v].end(); ) {
-                    if (it->first == u) {
-                        it = graph.adj_list[v].erase(it);
-                    } else {
-                        ++it;
-                    }
+            }
+            if (!found_v_to_u) {
+                graph.adj_list[v].emplace_back(u, weight);  
+            }
+        } else {
+            for (auto it = graph.adj_list[u].begin(); it != graph.adj_list[u].end(); ) {
+                if (it->first == v) {
+                    it = graph.adj_list[u].erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            for (auto it = graph.adj_list[v].begin(); it != graph.adj_list[v].end(); ) {
+                if (it->first == u) {
+                    it = graph.adj_list[v].erase(it);
+                } else {
+                    ++it;
                 }
             }
         }
@@ -820,7 +795,7 @@ void process_updates(Graph& graph, const vector<EdgeUpdate>& updates,
         cout << "New graph size: " << graph.num_nodes << " nodes, " << graph.num_edges << " edges" << endl;
     }
     
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD); 
     
     if (rank == 0) {
         cout << "Identifying affected nodes in the SSSP tree..." << endl;
@@ -835,12 +810,12 @@ void process_updates(Graph& graph, const vector<EdgeUpdate>& updates,
         cout << "Affected nodes identified in " << identify_time << " ms" << endl;
     }
     
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD); 
     
     int local_affected_count = 0;
     for (size_t i = 0; i < part_info.local_vertices.size(); i++) {
         int u = part_info.local_vertices[i];
-        if (u < 0 || u >= graph.num_nodes) continue;
+        if (u < 0 || u >= graph.num_nodes) continue; 
         
         if (sssp_data.is_affected[u]) {
             local_affected_count++;
@@ -895,7 +870,7 @@ void process_updates(Graph& graph, const vector<EdgeUpdate>& updates,
             cout << "No nodes affected by the updates, SSSP tree remains unchanged." << endl;
             cout << "Total update processing time: " << (graph_update_time + identify_time) << " ms" << endl;
         }
-        compute_time = 0;
+        compute_time = 0; 
     }
     
     bool found_cycle = false;
@@ -979,7 +954,7 @@ Graph read_metis_graph(const string& filename) {
          << num_edges << " edges, weighted=" << weighted << endl;
     
     Graph graph(num_nodes);
-    graph.num_edges = num_edges * 2;
+    graph.num_edges = num_edges * 2; 
     
     for (int i = 0; i < num_nodes; i++) {
         string line;
@@ -1001,7 +976,7 @@ Graph read_metis_graph(const string& filename) {
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
             } else {
-                weight = 1.0;
+                weight = 1.0; 
             }
             
             if (0 <= neighbor && neighbor < num_nodes) {
@@ -1107,12 +1082,13 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(&num_edges, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
 
-    
+    // Initialize graph on all processes
     if (rank != 0) {
         graph = Graph(num_nodes);
         graph.num_edges = num_edges;
     }
     
+    // Broadcast graph structure
     if (rank == 0) cout << "[Rank " << rank << "] Broadcasting graph structure to all processes..." << endl;
     
     for (int i = 0; i < num_nodes; i++) {
@@ -1167,6 +1143,7 @@ int main(int argc, char* argv[]) {
         partition = read_partitions(partition_file, num_nodes);
     }
     
+    // Broadcast partition information
     if (rank == 0) cout << "[Rank " << rank << "] Broadcasting partition information..." << endl;
     MPI_Bcast(partition.data(), num_nodes, MPI_INT, 0, MPI_COMM_WORLD);
     
@@ -1187,25 +1164,22 @@ int main(int argc, char* argv[]) {
     
     for (int r = 0; r < num_procs; r++) {
         if (r == rank) {
-            cout << "[Rank " << rank << "] Local vertices: ";
-            
+
             cout << "[Rank " << rank << "] Local vertices: ";
             for (int i = 0; i < min(10, (int)part_info.local_vertices.size()); i++) {
                 cout << part_info.local_vertices[i] << " ";
             }
             if (part_info.local_vertices.size() > 10) cout << "...";
             cout << endl;
-            
 
         }
-        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD); 
     }
     
     SSSPData sssp_data(num_nodes);
     
     if (rank == 0) {
-        cout << "\n[Phase 4: Initial SSSP Computation] [Rank " << rank << "]" << endl;
-        cout << "-------------------------------------------------" << endl;
+        cout << "\n[Phase 4: Initial SSSP Computation] [Rank " << rank << "]\n" << endl;
     }
     
     auto start_time = chrono::high_resolution_clock::now();
@@ -1221,11 +1195,11 @@ int main(int argc, char* argv[]) {
     if (rank == 0) {
         cout << "\nInitial SSSP computation time: " << initial_time << " ms" << endl;
         
-        cout << "\n-----------------------------------------" << endl;
+        cout << "\n" << endl;
         cout << "Initial SSSP Results (Source: " << source_vertex << ")" << endl;
-        cout << "-----------------------------------------" << endl;
+        cout << " " << endl;
         cout << "| Node | Distance | Parent |" << endl;
-        cout << "-----------------------------------------" << endl;
+        cout << " " << endl;
         
         for (int i = 0; i < num_nodes; i++) {
             cout << "| " << setw(4) << i << " | ";
@@ -1236,7 +1210,7 @@ int main(int argc, char* argv[]) {
             }
             cout << setw(6) << sssp_data.parents[i] << " |" << endl;
         }
-        cout << "-----------------------------------------" << endl;
+        cout << endl;
     }
     
     vector<EdgeUpdate> updates;
@@ -1248,12 +1222,12 @@ int main(int argc, char* argv[]) {
         mt19937 gen(rd());
         
         vector<int> all_nodes(num_nodes);
-        iota(all_nodes.begin(), all_nodes.end(), 0);
+        iota(all_nodes.begin(), all_nodes.end(), 0); 
         shuffle(all_nodes.begin(), all_nodes.end(), gen);
         
         affected_nodes.assign(all_nodes.begin(), all_nodes.begin() + num_affected_nodes);
         
-        // cout << "Generating updates for " << num_affected_nodes << " affected nodes (20% of nodes)" << endl;
+        cout << "Generating updates for " << num_affected_nodes << " affected nodes (20% of nodes)" << endl;
         // cout << "Affected nodes: ";
         // for (int node : affected_nodes) {
         //     cout << node << " ";
@@ -1261,14 +1235,14 @@ int main(int argc, char* argv[]) {
         // cout << endl;
         
         uniform_int_distribution<> node_selector(0, num_affected_nodes - 1);
-        uniform_int_distribution<> integer_weight_dist(1, 10);
-        uniform_int_distribution<> type_dist(0, 1);
+        uniform_int_distribution<> integer_weight_dist(1, 10);  
+        uniform_int_distribution<> type_dist(0, 1);             
         
         set<pair<int, int>> existing_edges;
         for (int i = 0; i < num_nodes; i++) {
             for (const auto& edge : graph.adj_list[i]) {
                 int j = edge.first;
-                if (i < j) {
+                if (i < j) { 
                     existing_edges.insert({i, j});
                 }
             }
@@ -1277,7 +1251,7 @@ int main(int argc, char* argv[]) {
         set<pair<int, int>> potential_new_edges;
         for (int i : affected_nodes) {
             for (int j : affected_nodes) {
-                if (i < j) {
+                if (i < j) { 
                     pair<int, int> edge = {i, j};
                     if (existing_edges.find(edge) == existing_edges.end()) {
                         potential_new_edges.insert(edge);
@@ -1302,7 +1276,7 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < num_insertions && i < potential_new_edges_vec.size(); i++) {
                 int u = potential_new_edges_vec[i].first;
                 int v = potential_new_edges_vec[i].second;
-                int weight = integer_weight_dist(gen);
+                int weight = integer_weight_dist(gen);  // Whole numbers 1-20
                 updates.emplace_back(u, v, static_cast<double>(weight), true);
             }
         }
@@ -1330,6 +1304,7 @@ int main(int argc, char* argv[]) {
         cout << "Generated " << updates.size() << " total updates" << endl;
     }
     
+    // Broadcast number of updates
     int num_updates = updates.size();
     MPI_Bcast(&num_updates, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
@@ -1337,6 +1312,7 @@ int main(int argc, char* argv[]) {
         updates.resize(num_updates);
     }
     
+    // Broadcast updates
     for (int i = 0; i < num_updates; i++) {
         int src, dest;
         double weight;
@@ -1360,8 +1336,7 @@ int main(int argc, char* argv[]) {
     }
     
     if (rank == 0) {
-        cout << "\n[Phase 5: Processing Updates] [Rank " << rank << "]" << endl;
-        cout << "-------------------------------------------------" << endl;
+        cout << "\n[Phase 5: Processing Updates] [Rank " << rank << "]\n" << endl;
     }
     
     MPI_Barrier(MPI_COMM_WORLD);
@@ -1378,9 +1353,7 @@ int main(int argc, char* argv[]) {
         cout << "\nTotal update processing time: " << update_time << " ms" << endl;
         cout << "Time per update: " << (double)update_time / num_updates << " ms" << endl;
         
-        cout << endl;
-        cout << "Updates Statistics" << endl;
-        cout << endl;
+        cout << "\nUpdates Statistics\n" << endl;
         cout << "Total updates processed: " << num_updates << endl;
         int insertions = 0, deletions = 0;
         for (const auto& update : updates) {
@@ -1402,7 +1375,6 @@ int main(int argc, char* argv[]) {
             cout << setw(11) << update.dest << " | ";
             cout << setw(6) << update.weight << " |" << endl;
         }
-        cout << "-----------------------------------------" << endl;
         
         cout << "\n-----------------------------------------" << endl;
         cout << "Updated SSSP Results (Source: " << source_vertex << ")" << endl;
@@ -1419,6 +1391,8 @@ int main(int argc, char* argv[]) {
             }
             cout << setw(6) << sssp_data.parents[i] << " |" << endl;
         }
+        cout << "-----------------------------------------" << endl;
+        
         cout << "-----------------------------------------" << endl;
         
         cout << "\n-----------------------------------------" << endl;
@@ -1460,7 +1434,7 @@ int main(int argc, char* argv[]) {
             cout << "| No changes in distances after updates |" << endl;
         }
         cout << "-----------------------------------------" << endl;
-
+        
         auto program_end_time = chrono::high_resolution_clock::now();
         auto total_time = chrono::duration_cast<chrono::milliseconds>(program_end_time - program_start_time).count();
         
@@ -1481,7 +1455,11 @@ int main(int argc, char* argv[]) {
         cout << "--------------------------------------------------" << endl;
         cout << "Total Execution Time: " << total_time << " ms" << endl;
         cout << "===================================================" << endl;
-
+        
+        cout << "\n===================================================" << endl;
+        cout << "Program Completed Successfully" << endl;
+        cout << "Total execution time: " << total_time << " ms" << endl;
+        cout << "===================================================" << endl;
     }
     
     MPI_Barrier(MPI_COMM_WORLD);
